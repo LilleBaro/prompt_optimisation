@@ -1,4 +1,3 @@
-
 PROMPT_TRANSFORMATION = {
     0: "",
     1: "Think step by step.",
@@ -9,8 +8,9 @@ PROMPT_TRANSFORMATION = {
     6: "Identify the relevant information before solving the problem.",
     7: "Breack the problem into smaller steps.",
     8: "Double-check your final answer.",
-    9: "Provide hte final answer clearly.",
+    9: "Provide the final answer clearly.",
 }
+
 
 def apply_transformation(prompt, action):
     """
