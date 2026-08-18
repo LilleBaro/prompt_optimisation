@@ -1,4 +1,5 @@
-Resumer de la chaine minimal à implementer pour l'instant
+# Resumer de la chaine minimal à implementer pour l'instant
+
 ---
 
 BASE_PROMPT
