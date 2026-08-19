@@ -2,10 +2,10 @@ PROMPT_TRANSFORMATIONS = {
 
     0: {
         "name": "step_by_step",
-        "instruction":"Think step by step."},
+        "instruction":"Solve the problem step by step."},
     1: {
         "name":"reasoning",
-        "instruction":"Solve the problem step by step"},
+        "instruction":"Explain your reasoning clearly."},
     2: {
         "name":"verification",
         "instruction":"Verify your answer before giving the final answer."},
@@ -14,16 +14,16 @@ PROMPT_TRANSFORMATIONS = {
         "instruction":"Check your calculations carefully."},
     4: {
         "name":"decomposition",
-        "instruction":"Explain your reasoning. clearly"},
+        "instruction":"Break the problem into smaller steps."},
     5: {
         "name":"relevant_information",
         "instruction":"Identify the relevant information before solving the problem."},
     6: {
         "name":"double_check",
-        "instruction":"Breack the problem into smaller steps."},
+        "instruction":"Double-check your final answer."},
     7: {
-        "name":"stop",
-        "instruction":"STOP"
+        "name":"answer_format",
+        "instruction":"Clearly state the final answer at the end."
     }
 
 }

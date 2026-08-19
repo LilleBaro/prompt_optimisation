@@ -2,194 +2,278 @@ import gymnasium as gym
 import numpy as np
 
 from prompts.base_prompt import BASE_PROMPT
-from prompts.transformations import PROMPT_TRANSFORMATIONS, apply_transformation
+from prompts.transformations import (
+    PROMPT_TRANSFORMATIONS,
+    apply_transformation,
+)
+
 
 class PromptOptimizationEnv(gym.Env):
     """
-    Gymnasium environment for prompt optimization using reinforcement leanrning.
+    Gymnasium environment for optimizing prompts using reinforcement learning.
 
-    The agent does not generate answer to GSMK8K problems. Instead, it learns 
-    to select prompt transformations that improve the performances of a frozen LLM
+    The agent selects prompt transformations in order to improve the
+    performance of a frozen language model on GSM8K.
 
-    Params
-    ------
-    evaluator : object
-        Object responsible for evaluating a prompt on GSM8K and returning its accuracy.
-    max steps : int, default=5
-        Maximum number of prompt transformations that can be applied during on episode
-    initial prompt: str, default=BASE_PROMPT
-        Initial prompt from which the agent starts each episode.
+    Parameters
+    ----------
+    evaluator : GSM8KEvaluator
+        Evaluator used to measure the performance of the current prompt.
+
+    max_steps : int, default=5
+        Maximum number of transformations that can be applied during
+        one episode.
+
+    initial_prompt : str, default=BASE_PROMPT
+        Prompt used to initialize each episode.
     """
+
     metadata = {"render_modes": ["human"]}
 
     def __init__(
-            self, 
-            evaluator,
-            max_steps=5,
-            initial_prompt=BASE_PROMPT
+        self,
+        evaluator,
+        max_steps=5,
+        initial_prompt=BASE_PROMPT,
     ):
         super().__init__()
+
         self.evaluator = evaluator
         self.max_steps = max_steps
         self.initial_prompt = initial_prompt
 
-        # number of available prompt transformations
-        self.n_actions = len(PROMPT_TRANSFORMATIONS)
-        # discrete action space:
-        # each integer corresponds to one prompt transformation
-        self.action_space = gym.spaces.Discrete(self.n_actions)
-        # the actual prompt is textual, so it can't directly be represneted 
-        # by a standard numerical gymnasium observation space.
-        # We temporarily expose the number of transformation already used
-        # a richer state representation will be introduced later.
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=1,
-            shape=(self.n_actions,),
-            dtype=np.float32
+        # Actions
+        self.stop_action = len(PROMPT_TRANSFORMATIONS)
+
+        self.n_actions = self.stop_action + 1
+
+        self.action_space = gym.spaces.Discrete(
+            self.n_actions
         )
+
+        # Observation
+
+        self.observation_space = gym.spaces.Box(
+            low=0.0,
+            high=1.0,
+            shape=(self.n_actions,),
+            dtype=np.float32,
+        )
+
+        # State variables
         self.prompt = None
         self.current_accuracy = None
-        self.selected_actions = None
-        self.steps = None
-    def reset(self, seed=None, options=None):
-        """
-        Reset the environement to its initial state.
-
-        Returns
-        ------
-        observation : np.ndarray
-            Initial state representation
-        info : dict
-            Additional information about the environment state. 
-        """
-        super().reset(seed=seed)
-        self.prompt = self.initial_prompt
         self.selected_actions = []
         self.steps = 0
 
-        # Evaluates the initial prompt
+    def reset(self, seed=None, options=None):
+        """
+        Reset the environment.
+
+        Returns
+        -------
+        observation : np.ndarray
+            Initial state.
+
+        info : dict
+            Additional information about the initial state.
+        """
+
+        super().reset(seed=seed)
+
+        self.prompt = self.initial_prompt
+
+        self.selected_actions = []
+
+        self.steps = 0
+
+        # Evaluate the initial prompt.
         self.current_accuracy = self.evaluator.evaluate(
             self.prompt
-        ) 
-        observation = self.get_observation()
+        )
+
+        observation = self._get_observation()
 
         info = {
-            "prompt":self.prompt,
+            "prompt": self.prompt,
             "accuracy": self.current_accuracy,
-            "selected_actions": self.selected_actions.copy()
+            "selected_actions": [],
         }
+
         return observation, info
 
     def step(self, action):
         """
-        Apply a prompt transformation and evaluate the resulting prompt
+        Apply an action and transition to the next state.
 
         Parameters
-        ------
-        action : int 
-            ID of the prompt transformation to apply.
-        
+        ----------
+        action : int
+            Selected prompt transformation or STOP action.
+
         Returns
-        ------
+        -------
         observation : np.ndarray
-            New state representation 
+            New state.
 
         reward : float
-            Improvement on GSM8K accuracy.
+            Reward associated with the selected action.
 
         terminated : bool
-            Wheter the episode has naturally terminated.
+            Whether the episode has ended naturally.
 
         truncated : bool
-            Whether the episode was truncated because the maximum number pf steps was reached
+            Whether the episode was truncated.
 
         info : dict
-            Additional information about the transition.
+            Additional transition information.
         """
+
         action = int(action)
-        # validate the action
+
         if not self.action_space.contains(action):
-            raise ValueError(f"Invalide action: {action}")
-        # prevent duplicated transformations 
-        if action in self.selected_actions:
-            reward = -1.0
-            observation = self.get_observation()
+            raise ValueError(
+                f"Invalid action: {action}"
+            )
+
+        # sTOP action
+        if action == self.stop_action:
+
+            observation = self._get_observation()
+
             info = {
                 "prompt": self.prompt,
                 "accuracy": self.current_accuracy,
-                "selected_actions": self.selected_actions.copy(),
-                "invalid_actions": True
+                "selected_actions": (
+                    self.selected_actions.copy()
+                ),
+                "last_action": action,
             }
+
             return (
                 observation,
-                reward,
+                0.0,
+                True,
                 False,
-                False,
-                info
+                info,
             )
-        # apply transformation
+
+        # prevent duplicate transformations
+        if action in self.selected_actions:
+
+            observation = self._get_observation()
+
+            info = {
+                "prompt": self.prompt,
+                "accuracy": self.current_accuracy,
+                "selected_actions": (
+                    self.selected_actions.copy()
+                ),
+                "last_action": action,
+                "invalid_action": True,
+            }
+
+            return (
+                observation,
+                -1.0,
+                False,
+                False,
+                info,
+            )
+
+        # current performance
+
         old_accuracy = self.current_accuracy
+
+        # apply transformation
+
         self.prompt = apply_transformation(
             self.prompt,
-            action
+            action,
         )
+
         self.selected_actions.append(action)
+
         self.steps += 1
+
         # evaluate new prompt
+
         self.current_accuracy = self.evaluator.evaluate(
             self.prompt
         )
-        # compute reward 
-        reward = self.current_accuracy - old_accuracy
-        # determine termination
+
+        # reward
+
+        reward = (
+            self.current_accuracy
+            - old_accuracy
+        )
+
+        # episode termination
+
         terminated = (
             self.steps >= self.max_steps
-            or len(self.selected_actions) >= self.n_actions
         )
+
         truncated = False
+
         observation = self._get_observation()
+
         info = {
-            "prompt":self.prompt,
+            "prompt": self.prompt,
             "accuracy": self.current_accuracy,
             "previous_accuracy": old_accuracy,
-            "selected_action": self.selected_actions.copy(),
-            "last_action": action
+            "selected_actions": (
+                self.selected_actions.copy()
+            ),
+            "last_action": action,
         }
+
         return (
             observation,
             reward,
             terminated,
             truncated,
-            info
+            info,
         )
+
     def _get_observation(self):
         """
-        Build the numerical represen tation of the current state
+        Build the numerical representation of the current state.
 
         Returns
-        ------
+        -------
         np.ndarray
-            Binary vector indicating which transformations have already
-            been selected.
+            Binary vector indicating which transformations have
+            already been selected.
         """
+
         observation = np.zeros(
             self.n_actions,
-            dtype=np.float32
+            dtype=np.float32,
         )
+
         for action in self.selected_actions:
             observation[action] = 1.0
+
         return observation
 
     def render(self):
         """
-        Display the current environment state.
+        Display the current state of the environment.
         """
-        print("="*60)
-        print(f"Step: {self.steps}")
-        print(f"Accuracy: {self.current_accuracy}")
-        print(f"Selected actions: {self.selected_actions}")
-        print(f"\nCurrent prompt: ")
-        print(self.prompt)
-        print("="*60)
 
+        print("=" * 60)
+        print(f"Step: {self.steps}")
+        print(
+            f"Accuracy: {self.current_accuracy:.4f}"
+        )
+        print(
+            f"Selected actions: "
+            f"{self.selected_actions}"
+        )
+
+        print("\nCurrent prompt:")
+        print(self.prompt)
+
+        print("=" * 60)

@@ -1,14 +1,6 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 
-# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# print(f"Using device: {DEVICE}")
-
-# def CallFrozenModel(model_name="Qwen/Qwen2.5-3B-Instruct"):
-#     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-#     model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).to(DEVICE)
-#     return tokenizer, model
-
 class FronzenLLM:
     """
     Wrapper around a frozen causal language model for prompt optimization.
@@ -64,8 +56,8 @@ class FronzenLLM:
         ------
         prompt : str
             Input prompt
-        
-        Returns 
+
+        Returns
         ------
         str
             Generated response.
@@ -98,15 +90,15 @@ class FronzenLLM:
                 "temperature": self.temperature,
             })
         else:
-            generation_kwargs({
+            generation_kwargs.update({
                 "do_sample":False
             })
-        with torch.inference_model():
+        with torch.inference_mode():
             outputs = self.model.generate(
                 **inputs,
                 **generation_kwargs
             )
-        input_length = input["input_ids"].shape[-1]
+        input_length = inputs["input_ids"].shape[-1]
         generated_tokens = outputs[0][input_length:]
         response = self.tokenizer.decode(
             generated_tokens,
