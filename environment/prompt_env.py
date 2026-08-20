@@ -136,7 +136,7 @@ class PromptOptimizationEnv(gym.Env):
                 f"Invalid action: {action}"
             )
 
-        # sTOP action
+        # STOP action
         if action == self.stop_action:
 
             observation = self._get_observation()

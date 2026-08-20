@@ -17,6 +17,7 @@ class GSM8KEvaluator:
     def __init__(self, llm, dataset):
         self.llm = llm
         self.dataset = dataset
+        self.cache = {}
 
     def evaluate(self, prompt, return_details=False):
         """
@@ -37,6 +38,8 @@ class GSM8KEvaluator:
             Otherwise, a dictionary containing accuracy and individual results.
         """
 
+        if prompt in self.cache and not return_details:
+            return self.cache[prompt]
         results = []
 
         for example in self.dataset:
@@ -76,6 +79,7 @@ class GSM8KEvaluator:
             sum(result["correct"] for result in results)
             / len(results)
         )
+        self.cache[prompt]=accuracy
 
         if return_details:
             return {
