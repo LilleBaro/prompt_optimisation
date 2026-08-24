@@ -67,7 +67,7 @@ class PolicyNetwork(nn.Module):
             Unnormalized action scores.
             
         value : torch.Tensor
-            Estimated action scores.
+            Estimated state value.
         """
 
         features = self.shared_network(state)
@@ -87,7 +87,7 @@ class PolicyNetwork(nn.Module):
         
         Returns 
         -------
-        torch.distrubutions.Categorical
+        torch.distributions.Categorical
             Categorical distribution over actions.
         """
 
@@ -96,7 +96,7 @@ class PolicyNetwork(nn.Module):
 
     def get_action(self, state, deterministic=False):
         """
-        Select an action according to the current polocy.
+        Select an action according to the current policy.
         
         Parameters
         ----------
@@ -104,7 +104,7 @@ class PolicyNetwork(nn.Module):
             Selected action.
         
         log_probability : torch.Tensor
-            Log probability og the selected action.
+            Log probability of the selected action.
         
         value : torch.Tensor
             Estimated state value.
@@ -154,7 +154,7 @@ class PolicyNetwork(nn.Module):
             Policy entropy.
         
         value : torch.Tensor
-            Extimated state values.
+            Estimated state values.
         """
 
         logits, values = self.forward(state)

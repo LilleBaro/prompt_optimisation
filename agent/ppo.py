@@ -1,9 +1,11 @@
 import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
 from agent.policy import PolicyNetwork
+from agent.rollout_buffer import RolloutBuffer
 
 
 class PPO:
@@ -22,7 +24,7 @@ class PPO:
         Discount factor.
 
     gae_lambda : float, default=0.95
-        GAE parameter used to estimate advantages.
+        GAE parameter.
 
     clip_epsilon : float, default=0.2
         PPO clipping parameter.
@@ -34,7 +36,13 @@ class PPO:
         Weight of the entropy bonus.
 
     update_epochs : int, default=4
-        Number of optimization epochs per collected trajectory.
+        Number of optimization epochs.
+
+    minibatch_size : int, default=32
+        Number of transitions used in each PPO mini-batch.
+
+    rollout_episodes : int, default=8
+        Number of episodes collected before each PPO update.
 
     hidden_dim : int, default=128
         Number of neurons in the policy hidden layers.
@@ -53,6 +61,8 @@ class PPO:
         value_coef=0.5,
         entropy_coef=0.01,
         update_epochs=4,
+        minibatch_size=32,
+        rollout_episodes=8,
         hidden_dim=128,
         device=None,
     ):
@@ -66,6 +76,8 @@ class PPO:
         self.entropy_coef = entropy_coef
 
         self.update_epochs = update_epochs
+        self.minibatch_size = minibatch_size
+        self.rollout_episodes = rollout_episodes
 
         # ---------------------------------------------------------
         # Device
@@ -115,28 +127,13 @@ class PPO:
     # ACTION SELECTION
     # =============================================================
 
-    def select_action(self, state, deterministic=False):
+    def select_action(
+        self,
+        state,
+        deterministic=False,
+    ):
         """
         Select an action using the current policy.
-
-        Parameters
-        ----------
-        state : np.ndarray
-            Current environment state.
-
-        deterministic : bool, default=False
-            Whether to select the most probable action.
-
-        Returns
-        -------
-        action : int
-            Selected action.
-
-        log_probability : float
-            Log probability of the selected action.
-
-        value : float
-            Estimated value of the current state.
         """
 
         state_tensor = torch.tensor(
@@ -161,32 +158,29 @@ class PPO:
         )
 
     # =============================================================
-    # TRAJECTORY COLLECTION
+    # ONE EPISODE
     # =============================================================
 
-    def collect_episode(self):
+    def collect_episode(self, buffer):
         """
-        Collect one complete trajectory from the environment.
+        Collect one complete trajectory and add it to a buffer.
+
+        Parameters
+        ----------
+        buffer : RolloutBuffer
+            Buffer receiving the collected transitions.
 
         Returns
         -------
-        trajectory : dict
-            Collected states, actions, rewards, log probabilities,
-            values and terminal flags.
+        dict
+            Episode statistics.
         """
 
         state, info = self.env.reset()
 
-        trajectory = {
-            "states": [],
-            "actions": [],
-            "rewards": [],
-            "log_probs": [],
-            "values": [],
-            "dones": [],
-        }
-
         done = False
+        episode_reward = 0.0
+        steps = 0
 
         while not done:
 
@@ -194,109 +188,89 @@ class PPO:
                 self.select_action(state)
             )
 
-            next_state, reward, terminated, truncated, info = (
-                self.env.step(action)
-            )
+            (
+                next_state,
+                reward,
+                terminated,
+                truncated,
+                info,
+            ) = self.env.step(action)
 
             done = terminated or truncated
 
-            trajectory["states"].append(state)
-            trajectory["actions"].append(action)
-            trajectory["rewards"].append(reward)
-            trajectory["log_probs"].append(log_prob)
-            trajectory["values"].append(value)
-            trajectory["dones"].append(done)
+            buffer.add(
+                state=state,
+                action=action,
+                reward=reward,
+                done=done,
+                log_prob=log_prob,
+                value=value,
+            )
+
+            episode_reward += reward
+            steps += 1
 
             state = next_state
 
-        return trajectory
+        return {
+            "reward": episode_reward,
+            "steps": steps,
+            "info": info,
+        }
 
     # =============================================================
-    # ADVANTAGE ESTIMATION
+    # ROLLOUT COLLECTION
     # =============================================================
 
-    def compute_gae(self, trajectory):
+    def collect_rollouts(self):
         """
-        Compute Generalized Advantage Estimation (GAE).
-
-        Parameters
-        ----------
-        trajectory : dict
-            Collected trajectory.
+        Collect several episodes before a PPO update.
 
         Returns
         -------
-        advantages : np.ndarray
-            Estimated advantages.
+        buffer : RolloutBuffer
+            Collected transitions.
 
-        returns : np.ndarray
-            Estimated discounted returns.
+        episode_statistics : list[dict]
+            Statistics for each episode.
         """
 
-        rewards = np.asarray(
-            trajectory["rewards"],
-            dtype=np.float32,
+        buffer = RolloutBuffer(
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
         )
 
-        values = np.asarray(
-            trajectory["values"],
-            dtype=np.float32,
-        )
+        episode_statistics = []
 
-        dones = np.asarray(
-            trajectory["dones"],
-            dtype=np.float32,
-        )
+        for _ in range(self.rollout_episodes):
 
-        advantages = np.zeros_like(
-            rewards
-        )
-
-        gae = 0.0
-
-        for t in reversed(range(len(rewards))):
-
-            if t == len(rewards) - 1:
-                next_value = 0.0
-            else:
-                next_value = values[t + 1]
-
-            non_terminal = 1.0 - dones[t]
-
-            delta = (
-                rewards[t]
-                + self.gamma
-                * next_value
-                * non_terminal
-                - values[t]
+            statistics = self.collect_episode(
+                buffer
             )
 
-            gae = (
-                delta
-                + self.gamma
-                * self.gae_lambda
-                * non_terminal
-                * gae
+            episode_statistics.append(
+                statistics
             )
 
-            advantages[t] = gae
+        buffer.compute_gae()
 
-        returns = advantages + values
-
-        return advantages, returns
+        return (
+            buffer,
+            episode_statistics,
+        )
 
     # =============================================================
     # PPO UPDATE
     # =============================================================
 
-    def update(self, trajectory):
+    def update(self, buffer):
         """
-        Update the policy using PPO.
+        Update the policy using collected rollouts.
 
         Parameters
         ----------
-        trajectory : dict
-            Collected trajectory.
+        buffer : RolloutBuffer
+            Collected rollout data.
 
         Returns
         -------
@@ -304,36 +278,34 @@ class PPO:
             Training statistics.
         """
 
-        advantages, returns = (
-            self.compute_gae(trajectory)
-        )
+        data = buffer.get_data()
 
         states = torch.tensor(
-            np.asarray(trajectory["states"]),
+            data["states"],
             dtype=torch.float32,
             device=self.device,
         )
 
         actions = torch.tensor(
-            trajectory["actions"],
+            data["actions"],
             dtype=torch.long,
             device=self.device,
         )
 
         old_log_probs = torch.tensor(
-            trajectory["log_probs"],
-            dtype=torch.float32,
-            device=self.device,
-        )
-
-        advantages = torch.tensor(
-            advantages,
+            data["old_log_probs"],
             dtype=torch.float32,
             device=self.device,
         )
 
         returns = torch.tensor(
-            returns,
+            data["returns"],
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        advantages = torch.tensor(
+            data["advantages"],
             dtype=torch.float32,
             device=self.device,
         )
@@ -342,127 +314,186 @@ class PPO:
         # Advantage normalization
         # ---------------------------------------------------------
 
-        advantages = (
-            advantages - advantages.mean()
-        ) / (
-            advantages.std() + 1e-8
-        )
+        if len(advantages) > 1:
+
+            advantages = (
+                advantages - advantages.mean()
+            ) / (
+                advantages.std(unbiased=False)
+                + 1e-8
+            )
 
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
 
+        update_count = 0
+
+        n_samples = len(states)
+
         # ---------------------------------------------------------
-        # PPO optimization epochs
+        # PPO epochs
         # ---------------------------------------------------------
 
         for _ in range(self.update_epochs):
 
-            (
-                new_log_probs,
-                entropy,
-                values,
-            ) = self.policy.evaluate_actions(
-                states,
-                actions,
+            indices = torch.randperm(
+                n_samples,
+                device=self.device,
             )
 
             # -----------------------------------------------------
-            # Probability ratio
+            # Mini-batches
             # -----------------------------------------------------
 
-            ratios = torch.exp(
-                new_log_probs - old_log_probs
-            )
+            for start in range(
+                0,
+                n_samples,
+                self.minibatch_size,
+            ):
 
-            # -----------------------------------------------------
-            # Clipped surrogate objective
-            # -----------------------------------------------------
+                batch_indices = indices[
+                    start:start + self.minibatch_size
+                ]
 
-            unclipped_objective = (
-                ratios * advantages
-            )
+                batch_states = states[
+                    batch_indices
+                ]
 
-            clipped_ratios = torch.clamp(
-                ratios,
-                1.0 - self.clip_epsilon,
-                1.0 + self.clip_epsilon,
-            )
+                batch_actions = actions[
+                    batch_indices
+                ]
 
-            clipped_objective = (
-                clipped_ratios * advantages
-            )
+                batch_old_log_probs = old_log_probs[
+                    batch_indices
+                ]
 
-            policy_loss = -torch.min(
-                unclipped_objective,
-                clipped_objective,
-            ).mean()
+                batch_returns = returns[
+                    batch_indices
+                ]
 
-            # -----------------------------------------------------
-            # Value loss
-            # -----------------------------------------------------
+                batch_advantages = advantages[
+                    batch_indices
+                ]
 
-            value_loss = nn.functional.mse_loss(
-                values,
-                returns,
-            )
+                # -------------------------------------------------
+                # Evaluate current policy
+                # -------------------------------------------------
 
-            # -----------------------------------------------------
-            # Entropy bonus
-            # -----------------------------------------------------
+                (
+                    new_log_probs,
+                    entropy,
+                    values,
+                ) = self.policy.evaluate_actions(
+                    batch_states,
+                    batch_actions,
+                )
 
-            entropy_loss = entropy.mean()
+                # -------------------------------------------------
+                # Probability ratio
+                # -------------------------------------------------
 
-            # -----------------------------------------------------
-            # Total loss
-            # -----------------------------------------------------
+                ratios = torch.exp(
+                    new_log_probs
+                    - batch_old_log_probs
+                )
 
-            loss = (
-                policy_loss
-                + self.value_coef * value_loss
-                - self.entropy_coef * entropy_loss
-            )
+                # -------------------------------------------------
+                # PPO clipped objective
+                # -------------------------------------------------
 
-            # -----------------------------------------------------
-            # Gradient update
-            # -----------------------------------------------------
+                unclipped_objective = (
+                    ratios * batch_advantages
+                )
 
-            self.optimizer.zero_grad()
+                clipped_ratios = torch.clamp(
+                    ratios,
+                    1.0 - self.clip_epsilon,
+                    1.0 + self.clip_epsilon,
+                )
 
-            loss.backward()
+                clipped_objective = (
+                    clipped_ratios
+                    * batch_advantages
+                )
 
-            torch.nn.utils.clip_grad_norm_(
-                self.policy.parameters(),
-                max_norm=0.5,
-            )
+                policy_loss = -torch.min(
+                    unclipped_objective,
+                    clipped_objective,
+                ).mean()
 
-            self.optimizer.step()
+                # -------------------------------------------------
+                # Value loss
+                # -------------------------------------------------
 
-            total_policy_loss += (
-                policy_loss.item()
-            )
+                value_loss = nn.functional.mse_loss(
+                    values,
+                    batch_returns,
+                )
 
-            total_value_loss += (
-                value_loss.item()
-            )
+                # -------------------------------------------------
+                # Entropy
+                # -------------------------------------------------
 
-            total_entropy += (
-                entropy_loss.item()
-            )
+                entropy_loss = entropy.mean()
+
+                # -------------------------------------------------
+                # Total loss
+                # -------------------------------------------------
+
+                loss = (
+                    policy_loss
+                    + self.value_coef * value_loss
+                    - self.entropy_coef * entropy_loss
+                )
+
+                # -------------------------------------------------
+                # Gradient update
+                # -------------------------------------------------
+
+                self.optimizer.zero_grad()
+
+                loss.backward()
+
+                torch.nn.utils.clip_grad_norm_(
+                    self.policy.parameters(),
+                    max_norm=0.5,
+                )
+
+                self.optimizer.step()
+
+                total_policy_loss += (
+                    policy_loss.item()
+                )
+
+                total_value_loss += (
+                    value_loss.item()
+                )
+
+                total_entropy += (
+                    entropy_loss.item()
+                )
+
+                update_count += 1
+
+        # ---------------------------------------------------------
+        # Statistics
+        # ---------------------------------------------------------
 
         return {
             "policy_loss": (
                 total_policy_loss
-                / self.update_epochs
+                / update_count
             ),
             "value_loss": (
                 total_value_loss
-                / self.update_epochs
+                / update_count
             ),
             "entropy": (
                 total_entropy
-                / self.update_epochs
+                / update_count
             ),
+            "buffer_size": len(buffer),
         }
 
     # =============================================================
@@ -476,48 +507,97 @@ class PPO:
         Parameters
         ----------
         n_episodes : int, default=100
-            Number of training episodes.
+            Total number of environment episodes.
 
         Returns
         -------
         history : list[dict]
-            Training statistics for each episode.
+            Training statistics.
         """
 
         history = []
 
-        for episode in range(n_episodes):
+        completed_episodes = 0
+        update_index = 0
 
-            trajectory = self.collect_episode()
+        while completed_episodes < n_episodes:
+
+            remaining_episodes = (
+                n_episodes
+                - completed_episodes
+            )
+
+            current_rollout_episodes = min(
+                self.rollout_episodes,
+                remaining_episodes,
+            )
+
+            # -----------------------------------------------------
+            # Temporarily collect the required number of episodes
+            # -----------------------------------------------------
+
+            original_rollout_episodes = (
+                self.rollout_episodes
+            )
+
+            self.rollout_episodes = (
+                current_rollout_episodes
+            )
+
+            buffer, episode_statistics = (
+                self.collect_rollouts()
+            )
+
+            self.rollout_episodes = (
+                original_rollout_episodes
+            )
+
+            # -----------------------------------------------------
+            # PPO update
+            # -----------------------------------------------------
 
             update_info = self.update(
-                trajectory
+                buffer
             )
 
-            episode_reward = sum(
-                trajectory["rewards"]
+            # -----------------------------------------------------
+            # Store episode statistics
+            # -----------------------------------------------------
+
+            for statistics in episode_statistics:
+
+                completed_episodes += 1
+
+                history.append({
+                    "episode": completed_episodes,
+                    "reward": statistics["reward"],
+                    "steps": statistics["steps"],
+                    "buffer_size": len(buffer),
+                    **update_info,
+                })
+
+            update_index += 1
+
+            # -----------------------------------------------------
+            # Logging
+            # -----------------------------------------------------
+
+            mean_reward = np.mean([
+                item["reward"]
+                for item in episode_statistics
+            ])
+
+            print(
+                f"Update {update_index} | "
+                f"Episodes "
+                f"{completed_episodes}/{n_episodes} | "
+                f"Mean Reward: "
+                f"{mean_reward:.4f} | "
+                f"Policy Loss: "
+                f"{update_info['policy_loss']:.4f} | "
+                f"Value Loss: "
+                f"{update_info['value_loss']:.4f}"
             )
-
-            history.append({
-                "episode": episode + 1,
-                "reward": episode_reward,
-                "steps": len(
-                    trajectory["rewards"]
-                ),
-                **update_info,
-            })
-
-            if (
-                (episode + 1) % 10 == 0
-            ):
-                print(
-                    f"Episode "
-                    f"{episode + 1}/{n_episodes} | "
-                    f"Reward: "
-                    f"{episode_reward:.4f} | "
-                    f"Policy Loss: "
-                    f"{update_info['policy_loss']:.4f}"
-                )
 
         return history
 
@@ -548,9 +628,13 @@ class PPO:
                 deterministic=True,
             )
 
-            next_state, reward, terminated, truncated, info = (
-                self.env.step(action)
-            )
+            (
+                next_state,
+                reward,
+                terminated,
+                truncated,
+                info,
+            ) = self.env.step(action)
 
             selected_actions.append(action)
 
