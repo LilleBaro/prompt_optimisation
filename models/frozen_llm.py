@@ -193,7 +193,7 @@ class FrozenLLM:
         ]
 
         # ---------------------------------------------------------
-        # Apply chat template to the entire batch
+        # Tokenization
         # ---------------------------------------------------------
 
         inputs = self.tokenizer.apply_chat_template(
@@ -210,8 +210,11 @@ class FrozenLLM:
             for key, value in inputs.items()
         }
 
+        # Length of the padded input sequence.
+        input_length = inputs["input_ids"].shape[1]
+
         # ---------------------------------------------------------
-        # Generate
+        # Generation
         # ---------------------------------------------------------
 
         with torch.inference_mode():
@@ -222,24 +225,14 @@ class FrozenLLM:
             )
 
         # ---------------------------------------------------------
-        # Extract only generated tokens
+        # Extract generated tokens
         # ---------------------------------------------------------
-
-        input_lengths = (
-            inputs["attention_mask"]
-            .sum(dim=1)
-        )
 
         responses = []
 
-        for output, input_length in zip(
-            outputs,
-            input_lengths,
-        ):
+        for output in outputs:
 
-            generated_tokens = output[
-                input_length:
-            ]
+            generated_tokens = output[input_length:]
 
             response = self.tokenizer.decode(
                 generated_tokens,

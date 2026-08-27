@@ -5,17 +5,24 @@ class GSM8KEvaluator:
     """
     Evaluate a frozen LLM on GSM8K problems.
 
+    The evaluator supports:
+
+    - prompt-level caching;
+    - batched LLM generation;
+    - accuracy computation;
+    - evaluation statistics.
+
     Parameters
     ----------
     llm : object
-        Frozen language model exposing ``generate`` and
-        ``generate_batch`` methods.
+        Frozen language model exposing ``generate(prompt)``
+        and ``generate_batch(prompts)`` methods.
 
     dataset : iterable
         GSM8K dataset containing ``question`` and ``answer`` fields.
 
     batch_size : int, default=8
-        Number of GSM8K problems processed simultaneously.
+        Number of GSM8K problems evaluated simultaneously.
     """
 
     def __init__(
@@ -25,12 +32,22 @@ class GSM8KEvaluator:
         batch_size=8,
     ):
         self.llm = llm
-        self.dataset = list(dataset)
+        self.dataset = dataset
         self.batch_size = batch_size
 
-        # Cache:
-        # prompt -> accuracy
+        # ---------------------------------------------------------
+        # Prompt-level cache
+        # ---------------------------------------------------------
+
         self.cache = {}
+
+        # ---------------------------------------------------------
+        # Evaluation statistics
+        # ---------------------------------------------------------
+
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.llm_calls = 0
 
     # =============================================================
     # EVALUATION
@@ -57,98 +74,112 @@ class GSM8KEvaluator:
         float or dict
             Accuracy if ``return_details=False``.
 
-            Otherwise, a dictionary containing accuracy
-            and individual results.
+            Otherwise, a dictionary containing accuracy,
+            individual results and evaluation statistics.
         """
 
         # ---------------------------------------------------------
-        # Cache
+        # Prompt-level cache
         # ---------------------------------------------------------
 
-        if (
-            prompt in self.cache
-            and not return_details
-        ):
-            return self.cache[prompt]
+        if prompt in self.cache:
+
+            self.cache_hits += 1
+
+            cached_result = self.cache[prompt]
+
+            if return_details:
+                return cached_result
+
+            return cached_result["accuracy"]
 
         # ---------------------------------------------------------
-        # Build all prompts
+        # Cache miss
         # ---------------------------------------------------------
 
-        full_prompts = [
+        self.cache_misses += 1
+
+        # ---------------------------------------------------------
+        # Build all GSM8K prompts
+        # ---------------------------------------------------------
+
+        examples = list(self.dataset)
+
+        prompts = [
             self.build_prompt(
                 prompt,
                 example["question"],
             )
-            for example in self.dataset
+            for example in examples
         ]
 
-        results = []
+        # ---------------------------------------------------------
+        # Batched generation
+        # ---------------------------------------------------------
 
-        # ---------------------------------------------------------
-        # Batch inference
-        # ---------------------------------------------------------
+        responses = []
 
         for start in range(
             0,
-            len(full_prompts),
+            len(prompts),
             self.batch_size,
         ):
 
-            end = start + self.batch_size
-
-            prompt_batch = full_prompts[
-                start:end
+            batch_prompts = prompts[
+                start:start + self.batch_size
             ]
 
-            examples_batch = self.dataset[
-                start:end
-            ]
-
-            responses = self.llm.generate_batch(
-                prompt_batch
+            batch_responses = (
+                self.llm.generate_batch(
+                    batch_prompts
+                )
             )
 
-            # -----------------------------------------------------
-            # Evaluate batch
-            # -----------------------------------------------------
+            responses.extend(
+                batch_responses
+            )
 
-            for example, response in zip(
-                examples_batch,
-                responses,
-            ):
+            self.llm_calls += len(
+                batch_prompts
+            )
 
-                question = example["question"]
+        # ---------------------------------------------------------
+        # Evaluate predictions
+        # ---------------------------------------------------------
 
-                target = self.extract_target_answer(
-                    example["answer"]
-                )
+        results = []
 
-                prediction = self.extract_prediction(
-                    response
-                )
+        for example, response in zip(
+            examples,
+            responses,
+        ):
 
-                correct = self.is_correct(
-                    prediction,
-                    target,
-                )
+            question = example["question"]
 
-                results.append({
-                    "question": question,
-                    "target": target,
-                    "response": response,
-                    "prediction": prediction,
-                    "correct": correct,
-                })
+            target = self.extract_target_answer(
+                example["answer"]
+            )
+
+            prediction = self.extract_prediction(
+                response
+            )
+
+            correct = self.is_correct(
+                prediction,
+                target,
+            )
+
+            results.append({
+                "question": question,
+                "target": target,
+                "response": response,
+                "prediction": prediction,
+                "correct": correct,
+            })
 
         # ---------------------------------------------------------
         # Accuracy
         # ---------------------------------------------------------
-
-        if not results:
-            raise ValueError(
-                "The GSM8K dataset is empty."
-            )
 
         accuracy = (
             sum(
@@ -159,25 +190,55 @@ class GSM8KEvaluator:
         )
 
         # ---------------------------------------------------------
-        # Cache accuracy
+        # Cache complete result
         # ---------------------------------------------------------
 
-        self.cache[prompt] = accuracy
+        evaluation_result = {
+            "accuracy": accuracy,
+            "results": results,
+        }
 
-        # ---------------------------------------------------------
-        # Return
-        # ---------------------------------------------------------
+        self.cache[prompt] = evaluation_result
 
         if return_details:
-            return {
-                "accuracy": accuracy,
-                "results": results,
-            }
+            return evaluation_result
 
         return accuracy
 
     # =============================================================
-    # PROMPT CONSTRUCTION
+    # STATISTICS
+    # =============================================================
+
+    def get_statistics(self):
+        """
+        Return evaluator statistics.
+
+        Returns
+        -------
+        dict
+            Evaluation and cache statistics.
+        """
+
+        total_evaluations = (
+            self.cache_hits
+            + self.cache_misses
+        )
+
+        return {
+            "total_evaluations": total_evaluations,
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "llm_calls": self.llm_calls,
+            "cache_hit_rate": (
+                self.cache_hits
+                / total_evaluations
+                if total_evaluations > 0
+                else 0.0
+            ),
+        }
+
+    # =============================================================
+    # PROMPT BUILDING
     # =============================================================
 
     @staticmethod
@@ -216,7 +277,18 @@ Problem:
     @staticmethod
     def extract_target_answer(answer):
         """
-        Extract the final numerical answer from a GSM8K target answer.
+        Extract the final numerical answer from a GSM8K target.
+
+        Parameters
+        ----------
+        answer : str
+            Original GSM8K answer containing reasoning and
+            final answer.
+
+        Returns
+        -------
+        str
+            Normalized final answer.
         """
 
         match = re.search(
@@ -225,8 +297,10 @@ Problem:
         )
 
         if match is None:
+
             raise ValueError(
-                f"Could not extract GSM8K target answer: {answer}"
+                f"Could not extract GSM8K target answer: "
+                f"{answer}"
             )
 
         return GSM8KEvaluator.normalize_number(
@@ -241,6 +315,16 @@ Problem:
     def extract_prediction(response):
         """
         Extract a numerical prediction from an LLM response.
+
+        Parameters
+        ----------
+        response : str
+            Generated model response.
+
+        Returns
+        -------
+        str or None
+            Extracted numerical answer.
         """
 
         patterns = [
@@ -266,7 +350,7 @@ Problem:
                 )
 
         # ---------------------------------------------------------
-        # Fallback
+        # Fallback: last number
         # ---------------------------------------------------------
 
         numbers = re.findall(
@@ -288,7 +372,17 @@ Problem:
     @staticmethod
     def normalize_number(value):
         """
-        Normalize a numerical answer before comparison.
+        Normalize a numerical answer.
+
+        Parameters
+        ----------
+        value : str
+            Numerical value.
+
+        Returns
+        -------
+        str
+            Normalized numerical representation.
         """
 
         value = value.strip()
@@ -317,7 +411,20 @@ Problem:
         target,
     ):
         """
-        Compare a model prediction with a GSM8K target.
+        Compare a prediction with the GSM8K target.
+
+        Parameters
+        ----------
+        prediction : str or None
+            Extracted model prediction.
+
+        target : str
+            Expected answer.
+
+        Returns
+        -------
+        bool
+            Whether the prediction is correct.
         """
 
         if prediction is None:
