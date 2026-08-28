@@ -44,6 +44,10 @@ class FrozenLLM:
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name
         )
+        self.tokenizer.padding_side = "left"
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
 
         # Qwen may not have a pad token explicitly defined.
         if self.tokenizer.pad_token is None:

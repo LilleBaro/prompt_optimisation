@@ -1,104 +1,171 @@
 import gymnasium as gym
 import numpy as np
 
-from prompts.transformations import (
-    PROMPT_TRANSFORMATIONS,
-    apply_transformation,
-)
+from prompts.transformations import apply_transformation
 
 
 class PromptOptimizationEnv(gym.Env):
     """
-    Reinforcement Learning environment for prompt optimization.
+    Gymnasium environment for prompt optimization.
 
-    The agent learns to select prompt transformations that improve
-    the performance of a frozen LLM on GSM8K.
-
-    At each step, the agent:
-
-    1. observes the current prompt state;
-    2. selects an unused prompt transformation;
-    3. evaluates the resulting prompt;
-    4. receives a reward based on the improvement in accuracy.
-
-    The reward is defined as:
-
-        reward = current_accuracy - previous_accuracy
+    The agent sequentially selects prompt transformations.
+    The LLM remains frozen and is evaluated after each transformation.
 
     Parameters
     ----------
-    evaluator : object
-        GSM8KEvaluator used to evaluate prompts.
+    evaluator : GSM8KEvaluator
+        Evaluator used to measure prompt performance.
 
     base_prompt : str
-        Initial prompt before transformations.
+        Initial prompt before any transformation.
 
     max_steps : int, default=5
         Maximum number of transformations per episode.
-    """
 
-    metadata = {
-        "render_modes": []
-    }
+    final_reward_coef : float, default=0.5
+        Weight applied to the final improvement relative to
+        the base prompt.
+    """
 
     def __init__(
         self,
         evaluator,
         base_prompt,
         max_steps=5,
+        final_reward_coef=0.5,
     ):
         super().__init__()
 
         self.evaluator = evaluator
         self.base_prompt = base_prompt
         self.max_steps = max_steps
+        self.final_reward_coef = final_reward_coef
+
+        # Number of available transformations
+        self.action_dim = 8
 
         # ---------------------------------------------------------
-        # Transformations
+        # Action space
         # ---------------------------------------------------------
-
-        self.transformations = PROMPT_TRANSFORMATIONS
 
         self.action_space = gym.spaces.Discrete(
-            len(self.transformations)
+            self.action_dim
         )
 
         # ---------------------------------------------------------
         # Observation space
         # ---------------------------------------------------------
 
+        # Current accuracy
+        # Previous accuracy
+        # Step progress
+        # Number of transformations already selected
+        #
+        # Plus one binary feature per action indicating whether
+        # the transformation has already been selected.
+        #
+        # Total:
+        # 4 + 8 = 12
+        # ---------------------------------------------------------
+
+        self.observation_dim = 12
+
         self.observation_space = gym.spaces.Box(
-            low=np.array(
-                [
-                    0.0,  # accuracy
-                    0.0,  # normalized step
-                    0.0,  # normalized prompt length
-                ],
-                dtype=np.float32,
-            ),
-            high=np.array(
-                [
-                    1.0,
-                    1.0,
-                    1.0,
-                ],
-                dtype=np.float32,
-            ),
+            low=0.0,
+            high=1.0,
+            shape=(self.observation_dim,),
             dtype=np.float32,
         )
 
         # ---------------------------------------------------------
-        # Internal state
+        # Episode state
         # ---------------------------------------------------------
 
         self.current_prompt = None
-        self.current_accuracy = None
+        self.current_accuracy = 0.0
+        self.base_accuracy = 0.0
+        self.previous_accuracy = 0.0
 
         self.step_count = 0
 
         self.selected_actions = []
 
         self.used_actions = set()
+
+    # =============================================================
+    # OBSERVATION
+    # =============================================================
+
+    def _get_observation(self):
+        """
+        Build the current environment observation.
+
+        Returns
+        -------
+        np.ndarray
+            Current environment state.
+        """
+
+        step_progress = (
+            self.step_count / self.max_steps
+        )
+
+        num_selected = (
+            len(self.selected_actions)
+            / self.action_dim
+        )
+
+        used_actions = np.zeros(
+            self.action_dim,
+            dtype=np.float32,
+        )
+
+        for action in self.used_actions:
+            used_actions[action] = 1.0
+
+        observation = np.concatenate(
+            [
+                np.array(
+                    [
+                        self.current_accuracy,
+                        self.previous_accuracy,
+                        step_progress,
+                        num_selected,
+                    ],
+                    dtype=np.float32,
+                ),
+                used_actions,
+            ]
+        )
+
+        return observation.astype(
+            np.float32
+        )
+
+    # =============================================================
+    # ACTION MASK
+    # =============================================================
+
+    def get_action_mask(self):
+        """
+        Return the mask of currently available actions.
+
+        Returns
+        -------
+        np.ndarray
+            Boolean mask where True means that the action
+            can still be selected.
+        """
+
+        mask = np.ones(
+            self.action_dim,
+            dtype=bool,
+        )
+
+        for action in self.used_actions:
+            mask[action] = False
+
+        return mask
 
     # =============================================================
     # RESET
@@ -116,15 +183,35 @@ class PromptOptimizationEnv(gym.Env):
         Returns
         -------
         observation : np.ndarray
-            Initial state.
+            Initial observation.
 
         info : dict
-            Information about the initial prompt.
+            Initial environment information.
         """
 
         super().reset(seed=seed)
 
-        self.current_prompt = self.base_prompt
+        self.current_prompt = (
+            self.base_prompt
+        )
+
+        # ---------------------------------------------------------
+        # Evaluate base prompt
+        # ---------------------------------------------------------
+
+        self.base_accuracy = (
+            self.evaluator.evaluate(
+                self.base_prompt
+            )
+        )
+
+        self.current_accuracy = (
+            self.base_accuracy
+        )
+
+        self.previous_accuracy = (
+            self.base_accuracy
+        )
 
         self.step_count = 0
 
@@ -132,22 +219,15 @@ class PromptOptimizationEnv(gym.Env):
 
         self.used_actions = set()
 
-        # ---------------------------------------------------------
-        # Evaluate base prompt
-        # ---------------------------------------------------------
-
-        self.current_accuracy = (
-            self.evaluator.evaluate(
-                self.current_prompt
-            )
+        observation = (
+            self._get_observation()
         )
-
-        observation = self._get_observation()
 
         info = {
             "prompt": self.current_prompt,
             "accuracy": self.current_accuracy,
-            "available_actions": self.get_available_actions(),
+            "base_accuracy": self.base_accuracy,
+            "actions": self.selected_actions,
         }
 
         return observation, info
@@ -163,45 +243,45 @@ class PromptOptimizationEnv(gym.Env):
         Parameters
         ----------
         action : int
-            ID of the transformation to apply.
+            Transformation ID.
 
         Returns
         -------
         observation : np.ndarray
-            New state.
+            New environment state.
 
         reward : float
-            Improvement in accuracy.
+            Reward obtained after the transformation.
 
         terminated : bool
-            Whether the episode naturally terminated.
+            Whether the episode naturally ended.
 
         truncated : bool
-            Whether the maximum number of steps was reached.
+            Whether the episode was truncated.
 
         info : dict
-            Transition information.
+            Environment information.
         """
 
         # ---------------------------------------------------------
         # Validate action
         # ---------------------------------------------------------
 
+        if action in self.used_actions:
+            raise ValueError(
+                f"Action {action} has already been selected."
+            )
+
         if not self.action_space.contains(action):
             raise ValueError(
                 f"Invalid action: {action}"
             )
 
-        if action in self.used_actions:
-            raise ValueError(
-                f"Action {action} has already been used."
-            )
-
         # ---------------------------------------------------------
-        # Previous accuracy
+        # Previous state
         # ---------------------------------------------------------
 
-        previous_accuracy = (
+        self.previous_accuracy = (
             self.current_accuracy
         )
 
@@ -216,16 +296,16 @@ class PromptOptimizationEnv(gym.Env):
             )
         )
 
-        # ---------------------------------------------------------
-        # Mark action as used
-        # ---------------------------------------------------------
-
         self.used_actions.add(action)
 
-        self.selected_actions.append(action)
+        self.selected_actions.append(
+            action
+        )
+
+        self.step_count += 1
 
         # ---------------------------------------------------------
-        # Evaluate new prompt
+        # Evaluate transformed prompt
         # ---------------------------------------------------------
 
         self.current_accuracy = (
@@ -235,49 +315,76 @@ class PromptOptimizationEnv(gym.Env):
         )
 
         # ---------------------------------------------------------
-        # Differential reward
+        # Local reward
         # ---------------------------------------------------------
 
         reward = (
             self.current_accuracy
-            - previous_accuracy
+            - self.previous_accuracy
         )
 
         # ---------------------------------------------------------
-        # Update step
-        # ---------------------------------------------------------
-
-        self.step_count += 1
-
-        # ---------------------------------------------------------
-        # Termination
+        # Episode termination
         # ---------------------------------------------------------
 
         terminated = (
-            len(self.used_actions)
-            == len(self.transformations)
+            self.step_count
+            >= self.max_steps
         )
 
-        truncated = (
-            self.step_count >= self.max_steps
-            and not terminated
-        )
+        truncated = False
+
+        # ---------------------------------------------------------
+        # Final reward
+        # ---------------------------------------------------------
+
+        final_reward = 0.0
+
+        if terminated:
+
+            final_improvement = (
+                self.current_accuracy
+                - self.base_accuracy
+            )
+
+            final_reward = (
+                self.final_reward_coef
+                * final_improvement
+            )
+
+            reward += final_reward
 
         # ---------------------------------------------------------
         # Observation
         # ---------------------------------------------------------
 
-        observation = self._get_observation()
+        observation = (
+            self._get_observation()
+        )
+
+        # ---------------------------------------------------------
+        # Information
+        # ---------------------------------------------------------
 
         info = {
             "prompt": self.current_prompt,
             "accuracy": self.current_accuracy,
-            "previous_accuracy": previous_accuracy,
-            "improvement": reward,
-            "action": action,
-            "action_name": self.transformations[action]["name"],
-            "step": self.step_count,
-            "available_actions": self.get_available_actions(),
+            "base_accuracy": self.base_accuracy,
+            "improvement": (
+                self.current_accuracy
+                - self.base_accuracy
+            ),
+            "previous_accuracy": (
+                self.previous_accuracy
+            ),
+            "local_reward": (
+                self.current_accuracy
+                - self.previous_accuracy
+            ),
+            "final_reward": final_reward,
+            "actions": list(
+                self.selected_actions
+            ),
         }
 
         return (
@@ -287,76 +394,3 @@ class PromptOptimizationEnv(gym.Env):
             truncated,
             info,
         )
-
-    # =============================================================
-    # AVAILABLE ACTIONS
-    # =============================================================
-
-    def get_available_actions(self):
-        """
-        Return transformations that have not yet been used.
-
-        Returns
-        -------
-        list[int]
-            IDs of available actions.
-        """
-
-        return [
-            action
-            for action in self.transformations
-            if action not in self.used_actions
-        ]
-
-    # =============================================================
-    # OBSERVATION
-    # =============================================================
-
-    def _get_observation(self):
-        """
-        Build the current normalized observation.
-
-        Returns
-        -------
-        np.ndarray
-            Current environment state.
-        """
-
-        normalized_step = (
-            self.step_count
-            / self.max_steps
-        )
-
-        normalized_length = min(
-            len(self.current_prompt)
-            / 1000.0,
-            1.0,
-        )
-
-        return np.array(
-            [
-                self.current_accuracy,
-                normalized_step,
-                normalized_length,
-            ],
-            dtype=np.float32,
-        )
-    def get_action_mask(self):
-        """
-        Return a boolean mask indicating which actions are available.
-
-        Returns
-        -------
-        np.ndarray
-            Boolean action mask.
-        """
-
-        mask = np.zeros(
-            self.action_space.n,
-            dtype=bool,
-        )
-
-        for action in self.get_available_actions():
-            mask[action] = True
-
-        return mask

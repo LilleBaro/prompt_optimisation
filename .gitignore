@@ -9,4 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-AGENTS.md
+test_entrainement.ipynb
+test_PPO.ipynb
+test_policy.ipynb

@@ -70,9 +70,6 @@ class PPO:
 
         self.update_epochs = update_epochs
 
-        # ---------------------------------------------------------
-        # Device
-        # ---------------------------------------------------------
 
         if device is None:
             device = (
@@ -104,10 +101,6 @@ class PPO:
             action_dim=action_dim,
             hidden_dim=hidden_dim,
         ).to(self.device)
-
-        # ---------------------------------------------------------
-        # Optimizer
-        # ---------------------------------------------------------
 
         self.optimizer = optim.Adam(
             self.policy.parameters(),

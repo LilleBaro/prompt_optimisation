@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 from torch.distributions import Categorical
 
@@ -37,7 +38,7 @@ class PolicyNetwork(nn.Module):
         super().__init__()
 
         # ---------------------------------------------------------
-        # Shared representation
+        # shared representation
         # ---------------------------------------------------------
 
         self.shared_network = nn.Sequential(
@@ -55,7 +56,7 @@ class PolicyNetwork(nn.Module):
         )
 
         # ---------------------------------------------------------
-        # Actor
+        # actor
         # ---------------------------------------------------------
 
         self.policy_head = nn.Linear(
@@ -64,7 +65,7 @@ class PolicyNetwork(nn.Module):
         )
 
         # ---------------------------------------------------------
-        # Critic
+        # critic
         # ---------------------------------------------------------
 
         self.value_head = nn.Linear(
@@ -72,9 +73,6 @@ class PolicyNetwork(nn.Module):
             1,
         )
 
-    # =============================================================
-    # FORWARD
-    # =============================================================
 
     def forward(self, state):
         """
@@ -304,3 +302,22 @@ class PolicyNetwork(nn.Module):
             entropy,
             values.squeeze(-1),
         )
+
+    def action_mask(self):
+        """
+        Return a boolean mask indicating which actions are available.
+        
+        Returns:
+        --------
+        np.array
+            Boolean action mask.
+        """
+
+        mask = np.zeros(
+            self.action_space.n,
+            dtype=bool
+        )
+
+        for action in self.get_available_actions():
+            mask[action] = True
+        return mask
