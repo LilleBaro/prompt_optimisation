@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
+from tqdm.auto import tqdm
 from agent.policy import PolicyNetwork
 
 
@@ -604,13 +604,15 @@ class PPO:
 
         history = []
 
-        for episode in range(
-            n_episodes
-        ):
+        progress_bar = tqdm(
+            range(n_episodes),
+            desc="PPO Training",
+            unit="episode",
+        )
 
-            trajectory = (
-                self.collect_episode()
-            )
+        for episode in progress_bar:
+
+            trajectory = self.collect_episode()
 
             update_info = self.update(
                 trajectory
@@ -620,33 +622,44 @@ class PPO:
                 trajectory["rewards"]
             )
 
+            # ---------------------------------------------------------
+            # Episode statistics
+            # ---------------------------------------------------------
+
             final_accuracy = (
                 self.env.current_accuracy
+            )
+
+            base_accuracy = (
+                self.env.base_accuracy
+            )
+
+            improvement = (
+                final_accuracy
+                - base_accuracy
             )
 
             history.append({
                 "episode": episode + 1,
                 "reward": episode_reward,
-                "accuracy": final_accuracy,
+                "base_accuracy": base_accuracy,
+                "final_accuracy": final_accuracy,
+                "improvement": improvement,
                 "steps": len(
                     trajectory["rewards"]
                 ),
                 **update_info,
             })
 
-            if (
-                (episode + 1) % 10 == 0
-            ):
-                print(
-                    f"Episode "
-                    f"{episode + 1}/{n_episodes} | "
-                    f"Reward: "
-                    f"{episode_reward:.4f} | "
-                    f"Accuracy: "
-                    f"{final_accuracy:.4f} | "
-                    f"Policy Loss: "
-                    f"{update_info['policy_loss']:.4f}"
-                )
+            # ---------------------------------------------------------
+            # Update progress bar
+            # ---------------------------------------------------------
+
+            progress_bar.set_postfix(
+                reward=f"{episode_reward:.3f}",
+                accuracy=f"{final_accuracy:.3f}",
+                improvement=f"{improvement:+.3f}",
+            )
 
         return history
 
