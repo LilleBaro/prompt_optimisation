@@ -1,0 +1,38 @@
+{
+    "configuration": {
+        "dataset_size": 50,
+        "model": "Qwen/Qwen2.5-3B-Instruct",
+        "learning_rate": 0.0001,
+        "gamma": 0.99,
+        "gae_lambda": 0.95,
+        "clip_epsilon": 0.2,
+        "value_coef": 0.5,
+        "entropy_coef": 0.01,
+        "update_epochs": 4,
+        "hidden_dim": 128
+    },
+    "PPO": {
+        "accuracy": 0.22,
+        "actions": [
+            1,
+            6,
+            5,
+            3,
+            2
+        ],
+        "reward": [
+            -0.16,
+            0.0,
+            0.0,
+            -0.06,
+            -0.17
+        ],
+        "value": [
+            -0.13873669505119324,
+            -0.18569937348365784,
+            -0.19545608758926392,
+            -0.2344890534877777,
+            -0.27677813172340393
+        ]
+    }
+}

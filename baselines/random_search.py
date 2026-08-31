@@ -54,7 +54,7 @@ class RandomSearch:
 
             observation, info = self.env.reset()
             available_actions = list(
-                range(self.env.stop_action)
+                range(self.env.action_dim)
                 )
             selected_actions = []
 
@@ -100,10 +100,11 @@ class RandomSearch:
                 best_accuracy=accuracy
                 best_prompt=info["prompt"]
                 best_action=selected_actions.copy()
-            return {
+        return {
                 "best_prompt": best_prompt,
                 "best_accuracy": best_accuracy,
                 "best_action": best_action,
                 "trials": trials_results
             }
+    
 
